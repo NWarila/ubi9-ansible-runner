@@ -18,6 +18,10 @@
 !/VERSION
 !/requirements-lint.txt
 
+!/tools/
+!/tools/check-pins.py
+!/tools/check-pins.selftest.py
+
 !/.github/
 !/.github/CODEOWNERS
 !/.github/renovate.json5

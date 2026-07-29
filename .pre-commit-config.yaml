@@ -22,3 +22,30 @@ repos:
     rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
     hooks:
       - id: actionlint
+
+  - repo: local
+    hooks:
+      - id: check-pins
+        name: check immutable dependency pins
+        entry: python3 tools/check-pins.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-pins-selftest
+        name: test pin-integrity policy
+        entry: python3 tools/check-pins.selftest.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff
+        name: ruff
+        entry: python3 -m ruff check tools
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: mypy
+        name: mypy strict
+        entry: python3 -m mypy --strict tools/check-pins.py tools/check-pins.selftest.py
+        language: system
+        pass_filenames: false
+        always_run: true
