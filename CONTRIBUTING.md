@@ -12,9 +12,13 @@ with the decisions under `docs/decision-records/`.
 
 The lint tool installer is hash-locked in `requirements-lint.txt`. The hook
 repositories are pinned to immutable commits in `.pre-commit-config.yaml`.
-The required pin-integrity hook checks pin and hash structure without accessing
-the network. It makes malformed or absent version comments, mutable action or
-hook references, and unpinned or unhashed requirement records merge-blocking.
+Without accessing the network, the required pin-integrity hook structurally
+checks remote repositories in `.pre-commit-config.yaml`, external `uses:`
+references in tracked workflow files directly under `.github/workflows/`, and
+pin and hash structure in tracked `requirements*.txt` files. It makes malformed
+or absent version comments, mutable references on those surfaces, unexpected
+external-reference count changes, and unpinned or unhashed requirement records
+merge-blocking. Composite actions under `.github/actions/` are not scanned.
 Upstream tag truth is separate maintainer evidence, not part of the required
 status.
 
@@ -72,6 +76,7 @@ printf '%s\n' \
   'python-discovery==1.5.0' \
   'pyyaml==6.0.3' \
   'ruff==0.16.0' \
+  'types-pyyaml==6.0.12.20260724' \
   'virtualenv==21.7.0' \
   >.cache/requirements-lint.in
 PYTHONPATH="${PWD}/.cache/lock-tools" \

@@ -36,6 +36,7 @@ class Checker(Protocol):
         *,
         root: Path | None = None,
         tracked_paths: Sequence[str] | None = None,
+        expected_reference_count: int = ...,
         resolver: Resolver = ...,
         clock: Clock = ...,
     ) -> Result: ...
@@ -146,6 +147,7 @@ def _fixture_result(
     workflow: str | None = None,
     requirements: str | None = None,
     tracked_paths: Sequence[str] | None = None,
+    expected_reference_count: int | None = None,
     resolver: Resolver | None = None,
     clock: Clock | None = None,
     remove_config: bool = False,
@@ -165,9 +167,22 @@ def _fixture_result(
             (root / ".pre-commit-config.yaml").unlink()
         if invalid_config_utf8:
             (root / ".pre-commit-config.yaml").write_bytes(b"\xff")
+        effective_tracked_paths = (
+            tracked_paths if tracked_paths is not None else _tracked()
+        )
+        effective_expected_count = (
+            expected_reference_count
+            if expected_reference_count is not None
+            else (
+                2
+                if ".github/workflows/test.yaml" in effective_tracked_paths
+                else 1
+            )
+        )
         options: dict[str, object] = {
             "root": root,
-            "tracked_paths": tracked_paths if tracked_paths is not None else _tracked(),
+            "tracked_paths": effective_tracked_paths,
+            "expected_reference_count": effective_expected_count,
         }
         if resolver is not None:
             options["resolver"] = resolver
@@ -300,11 +315,63 @@ def _static_cases() -> None:
         "POLICY VIOLATION .pre-commit-config.yaml:2: remote repo must be a "
         "canonical public https://github.com/owner/repo URL",
     )
+    flow_config = (
+        "repos:\n"
+        "  - {repo: 'https://github.com/adrienverge/yamllint', "
+        "rev: v1.38.0, hooks: [{id: yamllint}]}\n"
+    )
+    _assert_result(
+        "hook_flow_mapping_tag",
+        _fixture_result(config=flow_config),
+        1,
+        "POLICY VIOLATION .pre-commit-config.yaml:2: rev must be a 40-character "
+        "lowercase hexadecimal SHA (found 'v1.38.0')",
+    )
+    zero_space_config = (
+        "repos:\n"
+        "- repo: https://github.com/adrienverge/yamllint\n"
+        "  rev: v1.38.0\n"
+        "  hooks:\n"
+        "    - id: yamllint\n"
+    )
+    _assert_result(
+        "hook_zero_space_indent",
+        _fixture_result(config=zero_space_config),
+        1,
+        "POLICY VIOLATION .pre-commit-config.yaml:3: rev must be a 40-character "
+        "lowercase hexadecimal SHA (found 'v1.38.0')",
+    )
+    four_space_config = (
+        "repos:\n"
+        "    - repo: https://github.com/adrienverge/yamllint\n"
+        "      rev: v1.38.0\n"
+        "      hooks:\n"
+        "        - id: yamllint\n"
+    )
+    _assert_result(
+        "hook_four_space_indent",
+        _fixture_result(config=four_space_config),
+        1,
+        "POLICY VIOLATION .pre-commit-config.yaml:3: rev must be a 40-character "
+        "lowercase hexadecimal SHA (found 'v1.38.0')",
+    )
 
     action_v7 = _base_workflow().replace(f"@{SHA_ACTION}", "@v7")
     _assert_result(
         "action_tag_instead_of_sha",
         _fixture_result(workflow=action_v7),
+        1,
+        "POLICY VIOLATION .github/workflows/test.yaml:7: external uses reference "
+        "must be owner/repo[/path]@<40-character lowercase hexadecimal SHA> "
+        "(found 'actions/checkout@v7')",
+    )
+    flow_workflow = _base_workflow().replace(
+        f"      - uses: actions/checkout@{SHA_ACTION} # v7.0.0\n",
+        "      - {name: Check out, uses: 'actions/checkout@v7'}\n",
+    )
+    _assert_result(
+        "action_flow_mapping_tag",
+        _fixture_result(workflow=flow_workflow),
         1,
         "POLICY VIOLATION .github/workflows/test.yaml:7: external uses reference "
         "must be owner/repo[/path]@<40-character lowercase hexadecimal SHA> "
@@ -364,16 +431,46 @@ def _static_cases() -> None:
     )
     _assert_result(
         "local_action_exempt",
-        _fixture_result(workflow=local_workflow),
+        _fixture_result(
+            workflow=local_workflow,
+            expected_reference_count=1,
+        ),
         0,
         "Pin integrity check passed: 1 external reference, 1 requirement record",
     )
     quoted_local_workflow = local_workflow.replace("./local-action", '"./local-action"')
     _assert_result(
         "quoted_local_action_exempt",
-        _fixture_result(workflow=quoted_local_workflow),
+        _fixture_result(
+            workflow=quoted_local_workflow,
+            expected_reference_count=1,
+        ),
         0,
         "Pin integrity check passed: 1 external reference, 1 requirement record",
+    )
+    run_block_workflow = _base_workflow().replace(
+        "      - uses: ./local-action\n",
+        "      - run: |\n"
+        "          cat <<'PIN_TEXT'\n"
+        "          uses: actions/setup-python@v6\n"
+        "          PIN_TEXT\n"
+        "      - uses: ./local-action\n",
+    )
+    _assert_result(
+        "workflow_run_block_uses_text",
+        _fixture_result(workflow=run_block_workflow),
+        0,
+        clean,
+    )
+    _assert_result(
+        "external_reference_count_drop",
+        _fixture_result(
+            workflow=local_workflow,
+            expected_reference_count=2,
+        ),
+        1,
+        "POLICY VIOLATION <repository>:1: expected exactly 2 external references, "
+        "discovered 1",
     )
 
     _assert_result(

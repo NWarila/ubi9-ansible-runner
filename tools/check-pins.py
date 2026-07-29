@@ -12,7 +12,10 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Final, Never, TextIO
+from typing import Final, Never, TextIO, cast
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 EXIT_CLEAN: Final = 0
 EXIT_VIOLATION: Final = 1
@@ -21,6 +24,7 @@ EXIT_USAGE: Final = 64
 
 PER_REMOTE_TIMEOUT_SECONDS: Final = 10.0
 AGGREGATE_TIMEOUT_SECONDS: Final = 60.0
+EXPECTED_EXTERNAL_REFERENCE_COUNT: Final = 5
 
 MATCH: Final = "match"
 MISMATCH: Final = "mismatch"
@@ -84,6 +88,7 @@ class Inspection:
     violations: list[str]
     failures: list[InspectionFailure]
     pins: list[Pin]
+    reference_records: int = 0
     requirement_records: int = 0
 
 
@@ -133,19 +138,54 @@ def _canonical_github_url(value: str) -> tuple[str | None, str | None]:
     return f"https://github.com/{repository}", repository
 
 
-def _unquote_scalar(value: str) -> str | None:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        unquoted = value[1:-1]
-        if value[0] in unquoted or "\\" in unquoted:
-            return None
-        return unquoted
-    if value.startswith(("'", '"')) or value.endswith(("'", '"')):
-        return None
-    return value
-
-
 def _comment_tags(line: str) -> list[str]:
     return re.findall(rf"#\s*({SEMVER_TEXT})(?=\s|$)", line)
+
+
+def _compose_yaml(
+    path: str,
+    lines: Sequence[str],
+    inspection: Inspection,
+) -> Node | None:
+    try:
+        return cast(
+            Node | None,
+            yaml.compose("\n".join(lines), Loader=yaml.SafeLoader),
+        )
+    except yaml.YAMLError as error:
+        problem = getattr(error, "problem", None)
+        mark = getattr(error, "problem_mark", None)
+        location = f" at line {mark.line + 1}" if mark is not None else ""
+        detail = str(problem) if problem is not None else str(error).splitlines()[0]
+        inspection.failures.append(
+            InspectionFailure(path, f"cannot parse YAML{location}: {detail}")
+        )
+        return None
+
+
+def _mapping_values(node: MappingNode, field: str) -> list[Node]:
+    return [
+        value
+        for key, value in node.value
+        if isinstance(key, ScalarNode) and key.value == field
+    ]
+
+
+def _canonical_tag_comment(
+    lines: Sequence[str],
+    node: ScalarNode,
+) -> tuple[str | None, int]:
+    if node.start_mark.line != node.end_mark.line:
+        return None, 0
+    trailing = lines[node.end_mark.line][node.end_mark.column :]
+    tags = _comment_tags(trailing)
+    match = re.fullmatch(
+        rf"\s+#\s*(?P<tag>{SEMVER_TEXT})\s*",
+        trailing,
+    )
+    if len(tags) != 1 or match is None:
+        return None, len(tags)
+    return match.group("tag"), 1
 
 
 def _parse_pre_commit(root: Path, inspection: Inspection) -> None:
@@ -157,69 +197,66 @@ def _parse_pre_commit(root: Path, inspection: Inspection) -> None:
         )
         return
 
-    repo_starts = [
-        index
-        for index, line in enumerate(lines)
-        if re.match(r"^  - repo\s*:", line) is not None
-    ]
-    if not any(line == "repos:" for line in lines):
+    document = _compose_yaml(path, lines, inspection)
+    if document is None:
+        return
+    if not isinstance(document, MappingNode):
         inspection.failures.append(
             InspectionFailure(path, "cannot parse top-level repos list")
         )
         return
 
-    for position, start in enumerate(repo_starts):
-        end = (
-            repo_starts[position + 1] if position + 1 < len(repo_starts) else len(lines)
+    repos_fields = _mapping_values(document, "repos")
+    if len(repos_fields) != 1 or not isinstance(repos_fields[0], SequenceNode):
+        inspection.failures.append(
+            InspectionFailure(path, "cannot parse top-level repos list")
         )
-        block = lines[start:end]
-        repo_line = block[0]
-        repo_match = re.fullmatch(r"  - repo:\s*([^#]+?)\s*", repo_line)
-        if repo_match is None:
+        return
+
+    for item in repos_fields[0].value:
+        item_line = item.start_mark.line + 1
+        if not isinstance(item, MappingNode):
             inspection.violations.append(
-                _violation(path, start + 1, "repo must be one scalar value")
+                _violation(path, item_line, "repo entry must be a mapping")
             )
             continue
-        repo_value = _unquote_scalar(repo_match.group(1))
-        if repo_value is None or any(character.isspace() for character in repo_value):
+
+        repo_fields = _mapping_values(item, "repo")
+        if len(repo_fields) != 1 or not isinstance(repo_fields[0], ScalarNode):
             inspection.violations.append(
-                _violation(path, start + 1, "repo must be one scalar value")
+                _violation(path, item_line, "repo must be one scalar value")
             )
             continue
+        repo_node = repo_fields[0]
+        repo_value = repo_node.value
         if repo_value in {"local", "meta"}:
             continue
+        inspection.reference_records += 1
 
         repository_url, _ = _canonical_github_url(repo_value)
         if repository_url is None:
             inspection.violations.append(
                 _violation(
                     path,
-                    start + 1,
+                    repo_node.start_mark.line + 1,
                     "remote repo must be a canonical public https://github.com/owner/repo URL",
                 )
             )
 
-        rev_fields = [
-            (start + offset + 1, line)
-            for offset, line in enumerate(block)
-            if re.match(r"^\s+rev\s*:", line) is not None
-        ]
+        rev_fields = _mapping_values(item, "rev")
         if len(rev_fields) != 1:
             inspection.violations.append(
                 _violation(
                     path,
-                    start + 1,
+                    item_line,
                     f"remote repo must declare exactly one rev field (found {len(rev_fields)})",
                 )
             )
             continue
 
-        rev_line_number, rev_line = rev_fields[0]
-        scalar_match = re.match(r"^\s+rev:\s*([^#\s]+)", rev_line)
-        raw_scalar = (
-            scalar_match.group(1) if scalar_match is not None else "<non-scalar>"
-        )
-        scalar = _unquote_scalar(raw_scalar) or "<non-scalar>"
+        rev_node = rev_fields[0]
+        rev_line_number = rev_node.start_mark.line + 1
+        scalar = rev_node.value if isinstance(rev_node, ScalarNode) else "<non-scalar>"
         sha_valid = SHA_PATTERN.fullmatch(scalar) is not None
         if not sha_valid:
             inspection.violations.append(
@@ -231,18 +268,18 @@ def _parse_pre_commit(root: Path, inspection: Inspection) -> None:
                 )
             )
 
-        tags = _comment_tags(rev_line)
-        exact_line = re.fullmatch(
-            rf"\s+rev:\s*{re.escape(raw_scalar)}\s+#\s*(?P<tag>{SEMVER_TEXT})\s*",
-            rev_line,
+        tag, tag_count = (
+            _canonical_tag_comment(lines, rev_node)
+            if isinstance(rev_node, ScalarNode)
+            else (None, 0)
         )
-        if len(tags) != 1 or exact_line is None:
+        if tag is None:
             inspection.violations.append(
                 _violation(
                     path,
                     rev_line_number,
                     "rev must have exactly one canonical '# vX.Y.Z' comment "
-                    f"(found {len(tags)})",
+                    f"(found {tag_count})",
                 )
             )
             continue
@@ -254,7 +291,7 @@ def _parse_pre_commit(root: Path, inspection: Inspection) -> None:
                     line=rev_line_number,
                     repository_url=repository_url,
                     sha=scalar,
-                    tag=exact_line.group("tag"),
+                    tag=tag,
                 )
             )
 
@@ -276,22 +313,42 @@ def _parse_workflow(root: Path, path: str, inspection: Inspection) -> None:
         )
         return
 
-    for line_number, line in enumerate(lines, start=1):
-        if "uses" not in line:
+    document = _compose_yaml(path, lines, inspection)
+    if document is None:
+        return
+    if not isinstance(document, MappingNode):
+        inspection.failures.append(
+            InspectionFailure(path, "cannot parse workflow document")
+        )
+        return
+
+    uses_nodes: list[Node] = []
+    for jobs_node in _mapping_values(document, "jobs"):
+        if not isinstance(jobs_node, MappingNode):
             continue
-        uses_match = re.match(r"^\s*(?:-\s+)?uses\s*:\s*(.*?)\s*$", line)
-        if uses_match is None:
-            continue
-        value = uses_match.group(1)
-        raw_target = _remove_inline_comment(value).strip()
-        target = _unquote_scalar(raw_target)
-        if target is None:
+        for _, job_node in jobs_node.value:
+            if not isinstance(job_node, MappingNode):
+                continue
+            uses_nodes.extend(_mapping_values(job_node, "uses"))
+            for steps_node in _mapping_values(job_node, "steps"):
+                if not isinstance(steps_node, SequenceNode):
+                    continue
+                for step_node in steps_node.value:
+                    if isinstance(step_node, MappingNode):
+                        uses_nodes.extend(_mapping_values(step_node, "uses"))
+
+    for uses_node in uses_nodes:
+        line_number = uses_node.start_mark.line + 1
+        if not isinstance(uses_node, ScalarNode):
+            inspection.reference_records += 1
             inspection.violations.append(
                 _violation(path, line_number, "uses must be one scalar value")
             )
             continue
+        target = uses_node.value
         if target.startswith("./"):
             continue
+        inspection.reference_records += 1
         if target.startswith("docker://"):
             inspection.violations.append(
                 _violation(
@@ -314,18 +371,14 @@ def _parse_workflow(root: Path, path: str, inspection: Inspection) -> None:
                 )
             )
 
-        tags = _comment_tags(value)
-        exact_value = re.fullmatch(
-            rf"{re.escape(raw_target)}\s+#\s*(?P<tag>{SEMVER_TEXT})\s*",
-            value,
-        )
-        if len(tags) != 1 or exact_value is None:
+        tag, tag_count = _canonical_tag_comment(lines, uses_node)
+        if tag is None:
             inspection.violations.append(
                 _violation(
                     path,
                     line_number,
                     "external uses reference must have exactly one canonical "
-                    f"'# vX.Y.Z' comment (found {len(tags)})",
+                    f"'# vX.Y.Z' comment (found {tag_count})",
                 )
             )
             continue
@@ -338,7 +391,7 @@ def _parse_workflow(root: Path, path: str, inspection: Inspection) -> None:
                     line=line_number,
                     repository_url=f"https://github.com/{repository}",
                     sha=target_match.group("sha"),
-                    tag=exact_value.group("tag"),
+                    tag=tag,
                 )
             )
 
@@ -543,7 +596,11 @@ def discover_tracked_paths(
     return [path for path in paths if path], None
 
 
-def inspect_repository(root: Path, tracked_paths: Sequence[str]) -> Inspection:
+def inspect_repository(
+    root: Path,
+    tracked_paths: Sequence[str],
+    expected_reference_count: int,
+) -> Inspection:
     """Inspect all pin-bearing inputs and return every deterministic finding."""
 
     inspection = Inspection(violations=[], failures=[], pins=[])
@@ -552,6 +609,18 @@ def inspect_repository(root: Path, tracked_paths: Sequence[str]) -> Inspection:
         _parse_workflow(root, path, inspection)
     for path in _requirement_paths(tracked_paths):
         _parse_requirements(root, path, inspection)
+    if (
+        not inspection.failures
+        and inspection.reference_records != expected_reference_count
+    ):
+        inspection.violations.append(
+            _violation(
+                "<repository>",
+                1,
+                f"expected exactly {expected_reference_count} external references, "
+                f"discovered {inspection.reference_records}",
+            )
+        )
     return inspection
 
 
@@ -642,10 +711,12 @@ def _static_result(inspection: Inspection) -> RunResult:
         else "requirement records"
     )
     reference_label = (
-        "external reference" if len(inspection.pins) == 1 else "external references"
+        "external reference"
+        if inspection.reference_records == 1
+        else "external references"
     )
     message = (
-        f"Pin integrity check passed: {len(inspection.pins)} {reference_label}, "
+        f"Pin integrity check passed: {inspection.reference_records} {reference_label}, "
         f"{inspection.requirement_records} {record_label}"
     )
     return RunResult(EXIT_CLEAN, (message,))
@@ -719,6 +790,7 @@ def check_repository(
     *,
     verify_upstream: bool = False,
     tracked_paths: Sequence[str] | None = None,
+    expected_reference_count: int = EXPECTED_EXTERNAL_REFERENCE_COUNT,
     resolver: Resolver = resolve_upstream,
     clock: Clock = time.monotonic,
 ) -> RunResult:
@@ -740,7 +812,7 @@ def check_repository(
                 if verify_upstream
                 else _static_result(inspection)
             )
-    inspection = inspect_repository(root, paths)
+    inspection = inspect_repository(root, paths, expected_reference_count)
     if verify_upstream:
         return _upstream_result(inspection, resolver, clock)
     return _static_result(inspection)
@@ -770,6 +842,7 @@ def run(
     *,
     root: Path | None = None,
     tracked_paths: Sequence[str] | None = None,
+    expected_reference_count: int = EXPECTED_EXTERNAL_REFERENCE_COUNT,
     resolver: Resolver = resolve_upstream,
     clock: Clock = time.monotonic,
 ) -> RunResult:
@@ -782,6 +855,7 @@ def run(
         root or Path.cwd(),
         verify_upstream=bool(verify_upstream),
         tracked_paths=tracked_paths,
+        expected_reference_count=expected_reference_count,
         resolver=resolver,
         clock=clock,
     )
