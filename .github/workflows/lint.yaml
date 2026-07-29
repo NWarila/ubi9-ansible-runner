@@ -1,0 +1,47 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: pre-commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12.3"
+
+      - name: Install locked tools and run lint
+        run: |
+          python3 -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --target .lint-tools \
+            -r requirements-lint.txt
+          GOCACHE="${PWD}/.cache/go-build" \
+            GOPATH="${PWD}/.cache/go" \
+            npm_config_cache="${PWD}/.cache/npm" \
+            PRE_COMMIT_HOME="${PWD}/.cache/pre-commit" \
+            PYTHONPATH="${PWD}/.lint-tools" \
+            python3 -m pre_commit run --all-files --show-diff-on-failure
