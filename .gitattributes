@@ -1,0 +1,20 @@
+* text=auto eol=lf
+
+*.json   text eol=lf
+*.json5  text eol=lf
+*.jsonc  text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+LICENSE  text eol=lf
+VERSION  text eol=lf
+
+.github/                  export-ignore
+.gitignore                export-ignore
+.gitattributes            export-ignore
+.editorconfig             export-ignore
+.markdownlint-cli2.jsonc  export-ignore
+.pre-commit-config.yaml   export-ignore
+.yamllint                 export-ignore
+requirements-lint.txt     export-ignore

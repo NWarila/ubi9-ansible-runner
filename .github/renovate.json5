@@ -1,0 +1,26 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>NWarila/.github"
+  ],
+  "enabledManagers": [
+    "dockerfile",
+    "github-actions",
+    "custom.regex",
+    "pre-commit"
+  ],
+  "pre-commit": {
+    "enabled": true
+  },
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
+  "automerge": false,
+  "platformAutomerge": false,
+  "packageRules": [
+    {
+      "description": "Require explicit approval for every dependency update.",
+      "matchPackageNames": ["/.*/"],
+      "automerge": false
+    }
+  ]
+}

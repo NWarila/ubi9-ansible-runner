@@ -1,0 +1,24 @@
+minimum_pre_commit_version: "4.6.1"
+default_language_version:
+  golang: "1.26.5"
+  node: "22.23.1"
+  python: python3.12
+
+repos:
+  - repo: https://github.com/adrienverge/yamllint
+    rev: cba56bcde1fdd01c1deb3f945e69764c291a6530 # v1.38.0
+    hooks:
+      - id: yamllint
+        files: ^(\.pre-commit-config\.yaml|\.yamllint|\.github/.*\.ya?ml)$
+        args: [--strict, -c, .yamllint]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: 996abf60411a8d954288ac9856aae7602b80cbda # v0.22.1
+    hooks:
+      - id: markdownlint-cli2
+        files: ^.*\.md$
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+    hooks:
+      - id: actionlint
