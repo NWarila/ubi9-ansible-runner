@@ -39,9 +39,11 @@ jobs:
             --require-hashes \
             --target .lint-tools \
             -r requirements-lint.txt
+          mkdir -p "${PWD}/.cache/tmp"
           GOCACHE="${PWD}/.cache/go-build" \
             GOPATH="${PWD}/.cache/go" \
             npm_config_cache="${PWD}/.cache/npm" \
             PRE_COMMIT_HOME="${PWD}/.cache/pre-commit" \
             PYTHONPATH="${PWD}/.lint-tools" \
+            TMPDIR="${PWD}/.cache/tmp" \
             python3 -m pre_commit run --all-files --show-diff-on-failure
