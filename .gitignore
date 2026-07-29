@@ -7,7 +7,7 @@
 !/.markdownlint-cli2.jsonc
 !/.pre-commit-config.yaml
 !/.yamllint
-!/[A]GENTS.md
+!/AGENTS.md
 !/CHANGELOG.md
 !/CODE_OF_CONDUCT.md
 !/CONTRIBUTING.md
